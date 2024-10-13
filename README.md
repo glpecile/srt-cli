@@ -1,5 +1,15 @@
 # text-to-sub-cli
 
+A small Command Line Input
+
+## Run script
+
+```sh
+bunx srt-cli
+```
+
+## Run Locally
+
 To install dependencies:
 
 ```bash

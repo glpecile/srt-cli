@@ -1,14 +1,27 @@
 {
-    "name": "text-to-sub-cli",
+    "name": "srt-cli",
+    "description": "Simple CLI tool to generate .srt files",
+    "version": "0.0.1",
+    "author": "Gian Luca Pecile",
     "module": "index.ts",
+    "main": "index.ts",
     "type": "module",
     "devDependencies": {
         "@types/bun": "latest"
+    },
+    "bin": {
+        "srt-cli": "./index.ts"
     },
     "peerDependencies": {
         "typescript": "^5.0.0"
     },
     "scripts": {
         "start": "bun run index.ts"
-    }
+    },
+    "keywords": [
+        "srt",
+        "subtitles",
+        "cli"
+    ],
+    "license": "MIT"
 }
