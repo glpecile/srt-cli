@@ -52,57 +52,43 @@ function generateSRT(subtitles: Subtitle[], videoLength: number): string {
     return srtContent.trim();
 }
 
+async function promptUser(question: string): Promise<string> {
+    process.stdout.write(question);
+    return await new Promise((resolve) => {
+        process.stdin.once("data", (data) => {
+            resolve(data.toString().trim());
+        });
+    });
+}
+
 async function main() {
-    const videoLength = parseTimestamp("2:30"); // Example video length in seconds (2:20)
-    const subtitleText = `
-(0:06) Subaru: "...So Mimi stuck firmly to Beako, and Beako was very confused since she was not used to that."
+    console.log("Welcome to the .srt Generator CLI!");
 
+    // Ask for video length
+    const videoLengthInput = await promptUser(
+        "Enter the video length in mm:ss (ex. 2:30) ",
+    );
+    const videoLength = parseTimestamp(videoLengthInput);
 
-(0:12) Mimi: "You are saying that this gummy-cookie-like hairstyle is beautiful? I don't understand at all!"
+    if (isNaN(videoLength) || videoLength <= 0) {
+        console.error("Invalid video length. Please enter a valid format.");
+        process.exit(1);
+    }
 
+    // Ask for subtitle text
+    console.log("\nEnter the subtitle text (Press Enter twice when finished):");
+    let subtitleText = "";
+    let line;
+    while ((line = await promptUser("")) !== "") {
+        subtitleText += line + "\n";
+    }
 
-(0:18) Beatrice: "It's irritating to be judged by kids like you who don't know anything about beau- Hey! Don't pull my hair!"
+    // Ask for output file name
+    const outputFileName = await promptUser(
+        "\nEnter the name for the output SRT file (e.g., output.srt): ",
+    );
 
-
-(0:24) Petra: "Subaru-sama, Beatrice is looking at you horrifically.
-
-
-(0:29) Subaru: "We grow up by battling with things that we aren't used to. Beako often hates other people or stuff without any reason, so this is a challenge for her and we can just stand here and watch over her. Mom."
-
-
-(0:40) Petra:"What…what do you mean by Mom? Well then…"
-
-
-(0:49) Subaru: "It bugs me that Petra is the most mature one while there are many grown-ups among us."
-
-
-(0:54) Subaru: "Well, although I am talking about being mature, I am not a mature one myself, as I always get comforted…"
-
-
-(1:00) Emilia: "Since you can always calm yourself down in that way, I think I won't be able to understand you no matter how many times we quarrel. But, I love you being like this, Subaru."
-
-
-(1:12) Beatrice: "It's bad to try earning something while your values are not proper enough. You only acted unreasonably and recklessly when you were alone. You are not alone now, so I will help you earn anything you want."
-
-
-(1:28) Subaru: "I'm really getting too much love. But when it comes to Emilia, she even says something I completely don't understand to make me feel puzzled. I wish she could stop saying that she likes me or she thinks I'm cool so frequently."
-
-
-(1:41) Subaru: "I know, it's impolite to come to your place and keep talking Emilia and the others. Rem, I wonder if we will be the same on the day you wake up…Well, I don't think we will change much. Maybe because I am too lame, or maybe because you will respect me as always…
-
-
-(2:04) Rem: "No, you are not lame at all."
-
-
-(2:09) Rem: "Maybe on that day,I will make you the SUBARU of me."
-
-
-(2:12) Subaru: "Rem!"
-
-
-(2:20) Subaru: "Rem, I promise… I will get you back to us one day.
-    `;
-
+    // Process subtitles
     const subtitles = subtitleText
         .trim()
         .split(/\n{2,}/)
@@ -122,9 +108,15 @@ async function main() {
         })
         .filter((subtitle): subtitle is Subtitle => subtitle !== null);
 
+    // Generate and write SRT content
     const srtContent = generateSRT(subtitles, videoLength);
-    await write("output.srt", srtContent);
-    console.log("SRT file generated successfully: output.srt");
+    await write(`${outputFileName}.srt`, srtContent);
+    console.log(`.srt file generated successfully: ${outputFileName}.srt`);
+    // End the execution
+    process.exit(0);
 }
 
-main();
+main().catch((error) => {
+    console.error("An error occurred:", error);
+    process.exit(1);
+});
