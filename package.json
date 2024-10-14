@@ -1,27 +1,45 @@
 {
-    "name": "srt-cli",
-    "description": "Simple CLI tool to generate .srt files",
-    "version": "0.0.1",
-    "author": "Gian Luca Pecile",
-    "module": "index.ts",
-    "main": "index.ts",
-    "type": "module",
-    "devDependencies": {
-        "@types/bun": "latest"
-    },
-    "bin": {
-        "srt-cli": "./index.ts"
-    },
-    "peerDependencies": {
-        "typescript": "^5.0.0"
-    },
-    "scripts": {
-        "start": "bun run index.ts"
-    },
-    "keywords": [
-        "srt",
-        "subtitles",
-        "cli"
-    ],
-    "license": "MIT"
+  "name": "srt-cli",
+  "description": "Simple CLI tool to generate .srt files",
+  "version": "0.0.4",
+  "author": {
+    "name": "Gian Luca Pecile",
+    "url": "https://glpecile.xyz"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/glpecile/text-to-sub.git"
+  },
+  "bugs": {
+    "url": "https://github.com/glpecile/text-to-sub/issues"
+  },
+  "main": "./src/index.ts",
+  "type": "module",
+  "bin": {
+    "srt-cli": "src/cli.ts"
+  },
+  "keywords": [
+    "srt",
+    "subtitles",
+    "cli"
+  ],
+  "license": "MIT",
+  "engines": {
+    "bun": ">=1.1.30"
+  },
+  "packageManager": "bun@1.1.30",
+  "devDependencies": {
+    "@types/bun": "latest",
+    "bun-plugin-dts": "^0.3.0"
+  },
+  "peerDependencies": {
+    "typescript": "^5.0.0"
+  },
+  "scripts": {
+    "start": "bun run ./src/index.ts",
+    "lint": "tsc",
+    "ci": "bun run lint",
+    "prepublishOnly": "bun run ci",
+    "publish": "npm publish"
+  }
 }
