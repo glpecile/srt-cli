@@ -1,4 +1,4 @@
-# text-to-sub-cli
+# srt-cli
 
 A small Command Line Input (CLI) that takes a text file and converts it into a `.srt` file.
 
@@ -18,6 +18,12 @@ npx srt-cli
 ```
 
 Then follow the CLI steps.
+
+The text entered should follow the format:
+
+```xml
+(mm:ss) <character>: “<dialogue>”
+```
 
 ## Run Locally
 
