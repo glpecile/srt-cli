@@ -9,8 +9,8 @@ interface Subtitle {
 function parseTimestamp(timestamp: string): number {
   const match = timestamp.match(/(\d+):(\d+)/);
   if (match) {
-    const minutes = match[1] ? parseInt(match[1]) : 0;
-    const seconds = match[2] ? parseInt(match[2]) : 0;
+    const minutes = match[1] ? Number.parseInt(match[1]) : 0;
+    const seconds = match[2] ? Number.parseInt(match[2]) : 0;
     return minutes * 60 + seconds;
   }
   return 0;
@@ -73,9 +73,9 @@ export async function main() {
   const videoLengthInput = await promptUser(
     "Enter the video length in mm:ss (ex. 2:30) "
   );
-  const videoLength = parseTimestamp(videoLengthInput);
+  const videoLength = parseTimestamp(videoLengthInput || "2:30");
 
-  if (isNaN(videoLength) || videoLength <= 0) {
+  if (Number.isNaN(videoLength) || videoLength <= 0) {
     console.error("Invalid video length. Please enter a valid format.");
     process.exit(1);
   }
@@ -83,9 +83,11 @@ export async function main() {
   // Ask for subtitle text
   console.log("\nEnter the subtitle text (Press Enter twice when finished):");
   let subtitleText = "";
-  let line;
-  while ((line = await promptUser("")) !== "") {
-    subtitleText += line + "\n";
+  let line: string | null = null;
+  while (true) {
+    line = await promptUser("");
+    if (line === "") break;
+    subtitleText += `${line}\n`;
   }
 
   // Ask for output file name
@@ -99,7 +101,7 @@ export async function main() {
     .split(/\n{2,}/)
     .map((block) => {
       const match = block.trim().match(/^\(([^)]+)\)\s*([^:]+):\s*"?(.+?)"?$/s);
-      if (match && match[2] && match[3]) {
+      if (match?.[2] && match[3]) {
         return {
           timestamp: match[1],
           speaker: match[2].trim(),
@@ -113,7 +115,7 @@ export async function main() {
 
   // Generate and write SRT content
   const srtContent = generateSRT(subtitles, videoLength);
-  await write(`${outputFileName}.srt`, srtContent);
+  await write(`${outputFileName || "output"}.srt`, srtContent);
   console.log(`.srt file generated successfully: ${outputFileName}.srt`);
   // End the execution
   process.exit(0);
