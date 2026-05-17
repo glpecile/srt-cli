@@ -2,7 +2,7 @@ import { write } from "bun";
 import { unlink } from "node:fs/promises";
 import { basename, dirname, extname, join } from "node:path";
 import { stdin as input, stdout as output } from "node:process";
-import { createInterface } from "node:readline";
+import { createInterface, emitKeypressEvents } from "node:readline";
 
 interface Subtitle {
   timestamp: string;
@@ -30,6 +30,22 @@ interface SpinnerHandle {
 
 type PromptReader = AsyncIterableIterator<string>;
 
+interface Keypress {
+  ctrl?: boolean;
+  name?: string;
+}
+
+class CliCancelledError extends Error {
+  constructor(message = "Cancelled.") {
+    super(message);
+    this.name = "CliCancelledError";
+  }
+}
+
+let activeSpinner: SpinnerHandle | null = null;
+let cancelActiveSubprocess: (() => void) | null = null;
+let cliCancelled = false;
+
 const COMMENT_AUTHOR_CANDIDATES = [
   "KakoeiSbi",
   "@KakoeiSbi",
@@ -39,6 +55,10 @@ const COMMENT_AUTHOR_CANDIDATES = [
 
 const SUBTITLE_LINE_PATTERN =
   /^\s*\(?[0-9]+(?::[0-9]{1,2}){1,2}\)?\s*[^:]+:\s*["“]?.+["”]?\s*$/u;
+
+function isCliCancelledError(error: unknown): error is CliCancelledError {
+  return error instanceof CliCancelledError;
+}
 
 export function parseTimestamp(timestamp: string): number {
   const parts = timestamp
@@ -250,18 +270,42 @@ export function findSubtitleComment(comments: YouTubeComment[]): string | null {
 }
 
 function startSpinner(label: string): SpinnerHandle {
+  let done = false;
+  let handle: SpinnerHandle;
+
   if (!output.isTTY) {
     output.write(`${label}...\n`);
-    return {
+    handle = {
       stop(successMessage) {
+        if (done) {
+          return;
+        }
+
+        done = true;
+        if (activeSpinner === handle) {
+          activeSpinner = null;
+        }
+
         if (successMessage) {
           output.write(`${successMessage}\n`);
         }
       },
       fail(errorMessage) {
+        if (done) {
+          return;
+        }
+
+        done = true;
+        if (activeSpinner === handle) {
+          activeSpinner = null;
+        }
+
         output.write(`${errorMessage}\n`);
       },
     };
+
+    activeSpinner = handle;
+    return handle;
   }
 
   const frames = ["|", "/", "-", "\\"];
@@ -274,16 +318,83 @@ function startSpinner(label: string): SpinnerHandle {
   }, 120);
 
   const clear = (message: string) => {
+    if (done) {
+      return;
+    }
+
+    done = true;
     clearInterval(interval);
+    if (activeSpinner === handle) {
+      activeSpinner = null;
+    }
+
     output.write(`\r${message}${" ".repeat(Math.max(label.length + 2, 1))}\n`);
   };
 
-  return {
+  handle = {
     stop(successMessage = `${label} done.`) {
       clear(successMessage);
     },
     fail(errorMessage) {
       clear(errorMessage);
+    },
+  };
+
+  activeSpinner = handle;
+  return handle;
+}
+
+function createCancellationHandler(rl: ReturnType<typeof createInterface>) {
+  let spinnerCancelled = false;
+
+  const cancel = () => {
+    if (cliCancelled) {
+      return;
+    }
+
+    cliCancelled = true;
+
+    if (activeSpinner) {
+      spinnerCancelled = true;
+      activeSpinner.fail("Cancelled.");
+    }
+
+    try {
+      cancelActiveSubprocess?.();
+    } catch {
+      // Ignore subprocess cleanup errors during cancellation.
+    }
+
+    rl.close();
+  };
+
+  const handleSigint = () => {
+    cancel();
+  };
+
+  const handleKeypress = (_value: string, key: Keypress) => {
+    if (key.name === "escape" || (key.ctrl && key.name === "c")) {
+      cancel();
+    }
+  };
+
+  process.on("SIGINT", handleSigint);
+
+  if (input.isTTY) {
+    emitKeypressEvents(input, rl);
+    input.on("keypress", handleKeypress);
+  }
+
+  return {
+    cleanup() {
+      process.off("SIGINT", handleSigint);
+
+      if (input.isTTY) {
+        input.off("keypress", handleKeypress);
+      }
+    },
+    spinnerCancelled() {
+      return spinnerCancelled;
     },
   };
 }
@@ -306,18 +417,32 @@ function readStream(
 }
 
 async function runCommand(command: string[]): Promise<string> {
+  let ownsCancelHandler = false;
+
   try {
-    const subprocess = Bun.spawn({
+    if (cliCancelled) {
+      throw new CliCancelledError();
+    }
+
+    const spawnedSubprocess = Bun.spawn({
       cmd: command,
       stdout: "pipe",
       stderr: "pipe",
     });
+    ownsCancelHandler = true;
+    cancelActiveSubprocess = () => {
+      spawnedSubprocess.kill("SIGINT");
+    };
 
     const [stdoutText, stderrText, exitCode] = await Promise.all([
-      readStream(subprocess.stdout),
-      readStream(subprocess.stderr),
-      subprocess.exited,
+      readStream(spawnedSubprocess.stdout),
+      readStream(spawnedSubprocess.stderr),
+      spawnedSubprocess.exited,
     ]);
+
+    if (cliCancelled) {
+      throw new CliCancelledError();
+    }
 
     if (exitCode !== 0) {
       throw new Error(
@@ -329,6 +454,10 @@ async function runCommand(command: string[]): Promise<string> {
 
     return stdoutText;
   } catch (error) {
+    if (cliCancelled) {
+      throw new CliCancelledError();
+    }
+
     if (
       error instanceof Error &&
       (error.message.includes("No such file") || error.message.includes("ENOENT"))
@@ -337,6 +466,10 @@ async function runCommand(command: string[]): Promise<string> {
     }
 
     throw error;
+  } finally {
+    if (ownsCancelHandler) {
+      cancelActiveSubprocess = null;
+    }
   }
 }
 
@@ -487,18 +620,23 @@ async function promptUser(
 
   const nextLine = await prompts.next();
   if (nextLine.done) {
-    throw new Error("Input stream closed before the prompt was answered.");
+    throw new CliCancelledError();
   }
 
   return nextLine.value;
 }
 
 export async function main() {
+  cliCancelled = false;
+  activeSpinner = null;
+  cancelActiveSubprocess = null;
+
   const rl = createInterface({
     input,
     output,
     terminal: Boolean(input.isTTY && output.isTTY),
   });
+  const cancellationHandler = createCancellationHandler(rl);
   const prompts = rl[Symbol.asyncIterator]();
   const cliVideoUrl = process.argv[2]?.trim() ?? "";
 
@@ -607,7 +745,21 @@ export async function main() {
     } else {
       console.log(`.srt file generated successfully: ${outputFilePath}`);
     }
+  } catch (error) {
+    if (isCliCancelledError(error) || cliCancelled) {
+      if (!cancellationHandler.spinnerCancelled()) {
+        output.write("\nCancelled.\n");
+      }
+
+      return;
+    }
+
+    throw error;
   } finally {
+    cancellationHandler.cleanup();
+    cliCancelled = false;
+    cancelActiveSubprocess = null;
+    activeSpinner = null;
     rl.close();
   }
 }
