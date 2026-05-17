@@ -1,127 +1,366 @@
-import {write} from "bun";
+import { write } from "bun";
+import { basename, dirname, extname, join } from "node:path";
+import { stdin as input, stdout as output } from "node:process";
+import { createInterface } from "node:readline";
 
 interface Subtitle {
-    timestamp: string;
-    speaker: string;
-    dialogue: string;
+  timestamp: string;
+  speaker: string;
+  dialogue: string;
 }
 
+interface VideoMetadata {
+  title: string;
+  duration: number;
+}
+
+type PromptReader = AsyncIterableIterator<string>;
+
 function parseTimestamp(timestamp: string): number {
-    const match = timestamp.match(/(\d+):(\d+)/);
-    if (match) {
-        const minutes = match[1] ? Number.parseInt(match[1]) : 0;
-        const seconds = match[2] ? Number.parseInt(match[2]) : 0;
-        return minutes * 60 + seconds;
+  const parts = timestamp
+    .trim()
+    .split(":")
+    .map((part) => Number.parseInt(part, 10));
+
+  if (
+    parts.length < 2 ||
+    parts.length > 3 ||
+    parts.some((part) => Number.isNaN(part))
+  ) {
+    return Number.NaN;
+  }
+
+  if (parts.length === 2) {
+    const [minutes = 0, seconds = 0] = parts;
+    if (seconds >= 60) {
+      return Number.NaN;
     }
-    return 0;
+
+    return minutes * 60 + seconds;
+  }
+
+  const [hours = 0, minutes = 0, seconds = 0] = parts;
+  if (minutes >= 60 || seconds >= 60) {
+    return Number.NaN;
+  }
+
+  return hours * 3600 + minutes * 60 + seconds;
 }
 
 function formatSRTTimestamp(seconds: number): string {
-    const pad = (num: number): string => num.toString().padStart(2, "0");
-    const hours = Math.floor(seconds / 3600);
-    const minutes = Math.floor((seconds % 3600) / 60);
-    const secs = Math.floor(seconds % 60);
-    const ms = Math.floor((seconds % 1) * 1000);
-    return `${pad(hours)}:${pad(minutes)}:${pad(secs)},${ms
-        .toString()
-        .padStart(3, "0")}`;
+  const safeSeconds = Math.max(seconds, 0);
+  const pad = (num: number): string => num.toString().padStart(2, "0");
+  const hours = Math.floor(safeSeconds / 3600);
+  const minutes = Math.floor((safeSeconds % 3600) / 60);
+  const secs = Math.floor(safeSeconds % 60);
+  const wholeSeconds = Math.floor(safeSeconds);
+  const ms = Math.floor((safeSeconds - wholeSeconds) * 1000);
+
+  return `${pad(hours)}:${pad(minutes)}:${pad(secs)},${ms
+    .toString()
+    .padStart(3, "0")}`;
+}
+
+function formatDurationLabel(seconds: number): string {
+  const totalSeconds = Math.floor(seconds);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const secs = totalSeconds % 60;
+  const pad = (num: number): string => num.toString().padStart(2, "0");
+
+  if (hours > 0) {
+    return `${hours}:${pad(minutes)}:${pad(secs)}`;
+  }
+
+  return `${minutes}:${pad(secs)}`;
 }
 
 function generateSRT(subtitles: Subtitle[], videoLength: number): string {
-    let srtContent = "";
-    let index = 1;
+  let srtContent = "";
 
-    for (let i = 0; i < subtitles.length; i++) {
-        const currentSub = subtitles[i];
-        const nextSub = subtitles[i + 1];
+  for (let i = 0; i < subtitles.length; i++) {
+    const currentSub = subtitles[i];
+    const nextSub = subtitles[i + 1];
 
-        const startTime = currentSub ? parseTimestamp(currentSub.timestamp) : 0;
-        let endTime: number;
-
-        if (nextSub) {
-            endTime = parseTimestamp(nextSub.timestamp) - 0.001; // Subtract 1ms to avoid overlap
-        } else {
-            endTime = videoLength; // Use video length for the last subtitle
-        }
-
-        srtContent += `${index}\n`;
-        srtContent += `${formatSRTTimestamp(startTime)} --> ${formatSRTTimestamp(
-            endTime
-        )}\n`;
-        if (currentSub) srtContent += `${currentSub.dialogue}\n\n`;
-
-        index++;
+    if (!currentSub) {
+      continue;
     }
 
-    return srtContent.trim();
+    const startTime = parseTimestamp(currentSub.timestamp);
+    const nextStartTime = nextSub ? parseTimestamp(nextSub.timestamp) : null;
+    const endTime =
+      nextStartTime === null
+        ? Math.max(videoLength, startTime)
+        : Math.max(nextStartTime - 0.001, startTime);
+
+    srtContent += `${i + 1}\n`;
+    srtContent += `${formatSRTTimestamp(startTime)} --> ${formatSRTTimestamp(
+      endTime
+    )}\n`;
+    srtContent += `${currentSub.dialogue}\n\n`;
+  }
+
+  return srtContent.trim();
 }
 
-async function promptUser(question: string): Promise<string> {
-    process.stdout.write(question);
-    return await new Promise((resolve) => {
-        process.stdin.once("data", (data) => {
-            resolve(data.toString().trim());
-        });
+function splitCompositeSubtitleLine(line: string): string[] {
+  return line
+    .split(/\s+#\s+(?=\(?\d+(?::\d{1,2}){1,2})/)
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function parseSubtitleLine(line: string): Subtitle | null {
+  const match = line
+    .trim()
+    .match(/^\(?([0-9:]+)\)?\s*([^:]+):\s*["“]?(.+?)["”]?$/u);
+
+  if (!match?.[1] || !match[2] || !match[3]) {
+    console.warn(`Warning: Invalid subtitle format: ${line}`);
+    return null;
+  }
+
+  const timestamp = match[1].trim();
+  if (Number.isNaN(parseTimestamp(timestamp))) {
+    console.warn(`Warning: Invalid subtitle timestamp: ${line}`);
+    return null;
+  }
+
+  return {
+    timestamp,
+    speaker: match[2].trim(),
+    dialogue: match[3].trim().replace(/^["“]|["”]$/gu, ""),
+  };
+}
+
+function parseSubtitles(subtitleText: string): Subtitle[] {
+  return subtitleText
+    .split(/\r?\n/)
+    .flatMap(splitCompositeSubtitleLine)
+    .map(parseSubtitleLine)
+    .filter((subtitle): subtitle is Subtitle => subtitle !== null);
+}
+
+function ensureSrtExtension(fileName: string): string {
+  return fileName.toLowerCase().endsWith(".srt") ? fileName : `${fileName}.srt`;
+}
+
+function getSrtPathFromVideo(videoPath: string): string {
+  return join(
+    dirname(videoPath),
+    `${basename(videoPath, extname(videoPath))}.srt`
+  );
+}
+
+function readStream(
+  stream: ReadableStream<Uint8Array> | null | undefined
+): Promise<string> {
+  return stream ? new Response(stream).text() : Promise.resolve("");
+}
+
+async function runCommand(command: string[]): Promise<string> {
+  try {
+    const subprocess = Bun.spawn({
+      cmd: command,
+      stdout: "pipe",
+      stderr: "pipe",
     });
+
+    const [stdoutText, stderrText, exitCode] = await Promise.all([
+      readStream(subprocess.stdout),
+      readStream(subprocess.stderr),
+      subprocess.exited,
+    ]);
+
+    if (exitCode !== 0) {
+      throw new Error(
+        stderrText.trim() ||
+          stdoutText.trim() ||
+          `Command failed: ${command.join(" ")}`
+      );
+    }
+
+    return stdoutText;
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      (error.message.includes("No such file") || error.message.includes("ENOENT"))
+    ) {
+      throw new Error("`yt-dlp` is not installed or not available in PATH.");
+    }
+
+    throw error;
+  }
+}
+
+async function fetchVideoMetadata(url: string): Promise<VideoMetadata> {
+  const output = await runCommand([
+    "yt-dlp",
+    "--dump-single-json",
+    "--no-playlist",
+    "--no-warnings",
+    "--skip-download",
+    url,
+  ]);
+
+  let metadata: Partial<VideoMetadata>;
+
+  try {
+    metadata = JSON.parse(output) as Partial<VideoMetadata>;
+  } catch {
+    throw new Error("yt-dlp returned invalid metadata.");
+  }
+
+  if (typeof metadata.duration !== "number" || metadata.duration <= 0) {
+    throw new Error("Could not determine the video length from yt-dlp.");
+  }
+
+  return {
+    title:
+      typeof metadata.title === "string" && metadata.title.trim().length > 0
+        ? metadata.title.trim()
+        : "video",
+    duration: metadata.duration,
+  };
+}
+
+async function downloadVideo(url: string): Promise<string> {
+  const output = await runCommand([
+    "yt-dlp",
+    "--no-progress",
+    "--no-playlist",
+    "--print",
+    "filename",
+    "--print",
+    "after_move:filepath",
+    url,
+  ]);
+
+  const downloadedFilePath = output
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .at(-1);
+
+  if (!downloadedFilePath) {
+    throw new Error("yt-dlp finished without reporting the downloaded file path.");
+  }
+
+  return downloadedFilePath;
+}
+
+function validateUrl(url: string): void {
+  try {
+    new URL(url);
+  } catch {
+    throw new Error("Invalid URL. Paste a full YouTube URL or press Enter for manual mode.");
+  }
+}
+
+async function readSubtitleText(
+  prompts: PromptReader
+): Promise<string> {
+  console.log(
+    "\nEnter the subtitle text (one subtitle per line, press Enter twice when finished):"
+  );
+
+  const lines: string[] = [];
+
+  while (true) {
+    const line = await promptUser(prompts, "");
+    if (line.trim() === "") {
+      break;
+    }
+
+    lines.push(line);
+  }
+
+  return lines.join("\n");
+}
+
+async function promptUser(
+  prompts: PromptReader,
+  question: string
+): Promise<string> {
+  output.write(question);
+
+  const nextLine = await prompts.next();
+  if (nextLine.done) {
+    throw new Error("Input stream closed before the prompt was answered.");
+  }
+
+  return nextLine.value;
 }
 
 export async function main() {
+  const rl = createInterface({
+    input,
+    output,
+    terminal: Boolean(input.isTTY && output.isTTY),
+  });
+  const prompts = rl[Symbol.asyncIterator]();
+
+  try {
     console.log("Welcome to the .srt Generator CLI!");
 
-    // Ask for video length
-    const videoLengthInput = await promptUser(
-        "Enter the video length in mm:ss (ex. 2:30) "
-    );
-    const videoLength = parseTimestamp(videoLengthInput || "2:30");
+    const videoUrl = (
+      await promptUser(
+        prompts,
+        "Paste a YouTube URL to auto-download and infer video length, or press Enter to continue manually: "
+      )
+    ).trim();
 
-    if (Number.isNaN(videoLength) || videoLength <= 0) {
-        console.error("Invalid video length. Please enter a valid format.");
-        process.exit(1);
+    let videoLength: number;
+    let outputFilePath: string | null = null;
+
+    if (videoUrl) {
+      validateUrl(videoUrl);
+
+      console.log("\nFetching video metadata...");
+      const metadata = await fetchVideoMetadata(videoUrl);
+      videoLength = metadata.duration;
+      console.log(
+        `Found \"${metadata.title}\" (${formatDurationLabel(videoLength)}).`
+      );
+
+      console.log("Downloading video with yt-dlp...");
+      const downloadedVideoPath = await downloadVideo(videoUrl);
+      outputFilePath = getSrtPathFromVideo(downloadedVideoPath);
+      console.log(`Video saved to: ${downloadedVideoPath}`);
+      console.log(`Subtitle file will be written to: ${outputFilePath}`);
+    } else {
+      const videoLengthInput = await promptUser(
+        prompts,
+        "Enter the video length in mm:ss (ex. 2:30): "
+      );
+      videoLength = parseTimestamp(videoLengthInput || "2:30");
+
+      if (Number.isNaN(videoLength) || videoLength <= 0) {
+        throw new Error("Invalid video length. Please enter a valid mm:ss value.");
+      }
     }
 
-    // Ask for subtitle text
-    console.log("\nEnter the subtitle text (Press Enter twice when finished):");
-    let subtitleText = "";
-    let line: string | null = null;
-    while (true) {
-        line = await promptUser("");
-        if (line === "") break;
-        subtitleText += `${line}\n`;
+    const subtitleText = await readSubtitleText(prompts);
+    const subtitles = parseSubtitles(subtitleText);
+
+    if (subtitles.length === 0) {
+      throw new Error("No valid subtitles were provided.");
     }
 
-    // Ask for output file name
-    const outputFileName = await promptUser(
+    if (!outputFilePath) {
+      const outputFileName = await promptUser(
+        prompts,
         "\nEnter the name for the output SRT file (e.g., output.srt): "
-    );
+      );
+      outputFilePath = ensureSrtExtension(outputFileName.trim() || "output");
+    }
 
-    // Process subtitles
-    const subtitles = subtitleText
-        .trim()
-        .split(/\n{2,}/)
-        .map((block) => {
-            const match = block
-                .trim()
-                .match(/^\(?([^)]+)\)?\s*([^:]+):\s*"?(.+?)"?$/s);
-            if (match?.[2] && match[3]) {
-                return {
-                    timestamp: match[1],
-                    speaker: match[2].trim(),
-                    dialogue: match[3].trim().replace(/^"|"$/g, ""), // Remove leading/trailing quotes if present
-                };
-            }
-            console.warn(`Warning: Invalid subtitle format: ${block}`);
-            return null;
-        })
-        .filter((subtitle): subtitle is Subtitle => subtitle !== null);
-
-    // Generate and write SRT content
     const srtContent = generateSRT(subtitles, videoLength);
-    await write(`${outputFileName || "output"}.srt`, srtContent);
-    console.log(
-        `.srt file generated successfully: ${outputFileName || "output"}.srt`
-    );
-    // End the execution
-    process.exit(0);
+    await write(outputFilePath, srtContent);
+    console.log(`.srt file generated successfully: ${outputFilePath}`);
+  } finally {
+    rl.close();
+  }
 }
 
 // Run the main function if this script is executed directly
