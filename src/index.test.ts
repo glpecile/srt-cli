@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  appendCreditSubtitle,
   extractSubtitleTextFromComment,
   findSubtitleComment,
   generateSRT,
@@ -7,6 +8,7 @@ import {
   isMatchingCommentAuthor,
   parseSubtitles,
   parseTimestamp,
+  splitLongDialogue,
 } from "./index.ts";
 
 describe("parseTimestamp", () => {
@@ -120,6 +122,45 @@ describe("generateSRT", () => {
   test("derives the embedded video output path", () => {
     expect(getEmbeddedVideoPath("/tmp/video.webm")).toBe("/tmp/video.subbed.mkv");
     expect(getEmbeddedVideoPath("/tmp/My Clip.mp4")).toBe("/tmp/My Clip.subbed.mkv");
+  });
+
+  test("splits long dialogue into multiple readable cues", () => {
+    const srt = generateSRT(
+      [
+        {
+          timestamp: "00:00",
+          speaker: "A",
+          dialogue:
+            "It is due to her gate being dysfunctional. Because her gate being broken makes her unable to use magic completely. Although they are a minority, there are still people who have to bear undesirable defects once they are born.",
+        },
+      ],
+      9
+    );
+
+    expect(srt).toContain(
+      "Because her gate being broken makes her unable to use magic completely."
+    );
+    expect(srt).toContain("00:00:02,280 --> 00:00:04,439");
+    expect(srt).toContain("00:00:04,560 --> 00:00:06,719");
+
+    expect(srt.split("\n\n").length).toBeGreaterThan(1);
+  });
+});
+
+describe("subtitle post-processing", () => {
+  test("splits long dialogue into bounded chunks", () => {
+    const chunks = splitLongDialogue(
+      "This is a very long subtitle sentence that should be broken into smaller parts so that it is easier to read on screen."
+    );
+
+    expect(chunks.length).toBeGreaterThan(1);
+    expect(chunks.every((chunk) => chunk.length <= 84)).toBe(true);
+  });
+
+  test("appends a KakoeiSbi credit subtitle near the end", () => {
+    expect(appendCreditSubtitle('(00:00) A: "Hello"', 19)).toBe(
+      '(00:00) A: "Hello"\n(0:16) Credits: "Subtitle translation credits: @KakoeiSbi"'
+    );
   });
 });
 

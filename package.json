@@ -1,7 +1,7 @@
 {
   "name": "srt-cli",
   "description": "Simple CLI tool to generate .srt files",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "author": {
     "name": "Gian Luca Pecile",
     "url": "https://glpecile.xyz"

@@ -1,3 +1,4 @@
+#!/usr/bin/env bun
 import { write } from "bun";
 import { unlink } from "node:fs/promises";
 import { basename, dirname, extname, join } from "node:path";
@@ -55,6 +56,10 @@ const COMMENT_AUTHOR_CANDIDATES = [
 
 const SUBTITLE_LINE_PATTERN =
   /^\s*\(?[0-9]+(?::[0-9]{1,2}){1,2}\)?\s*[^:]+:\s*["“]?.+["”]?\s*$/u;
+
+const CREDIT_DIALOGUE = "Subtitle translation credits: @KakoeiSbi";
+const MAX_DIALOGUE_CHARS = 84;
+const AUTO_CHUNK_GAP_SECONDS = 0.12;
 
 function isCliCancelledError(error: unknown): error is CliCancelledError {
   return error instanceof CliCancelledError;
@@ -119,8 +124,68 @@ export function formatDurationLabel(seconds: number): string {
   return `${minutes}:${pad(secs)}`;
 }
 
+export function splitLongDialogue(dialogue: string, maxChars = MAX_DIALOGUE_CHARS): string[] {
+  const normalized = dialogue.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxChars) {
+    return [normalized];
+  }
+
+  const sentenceParts =
+    normalized.match(/[^.!?]+[.!?]*|[^.!?]+$/g)?.map((part) => part.trim()) ?? [normalized];
+  const chunks: string[] = [];
+  let currentChunk = "";
+
+  const pushChunk = (value: string) => {
+    const trimmed = value.trim();
+    if (trimmed) {
+      chunks.push(trimmed);
+    }
+  };
+
+  for (const part of sentenceParts) {
+    if (part.length > maxChars) {
+      pushChunk(currentChunk);
+      currentChunk = "";
+
+      const words = part.split(/\s+/).filter(Boolean);
+      let currentWordChunk = "";
+
+      for (const word of words) {
+        const candidate = currentWordChunk ? `${currentWordChunk} ${word}` : word;
+        if (candidate.length <= maxChars) {
+          currentWordChunk = candidate;
+        } else {
+          pushChunk(currentWordChunk);
+          currentWordChunk = word;
+        }
+      }
+
+      pushChunk(currentWordChunk);
+      continue;
+    }
+
+    const candidate = currentChunk ? `${currentChunk} ${part}` : part;
+    if (candidate.length <= maxChars) {
+      currentChunk = candidate;
+    } else {
+      pushChunk(currentChunk);
+      currentChunk = part;
+    }
+  }
+
+  pushChunk(currentChunk);
+  return chunks.length > 0 ? chunks : [normalized];
+}
+
+function buildSrtCue(index: number, startTime: number, endTime: number, dialogue: string): string {
+  return `${index}\n${formatSRTTimestamp(startTime)} --> ${formatSRTTimestamp(
+    endTime
+  )}\n${dialogue}\n\n`;
+}
+
 export function generateSRT(subtitles: Subtitle[], videoLength: number): string {
   let srtContent = "";
+  let cueIndex = 1;
 
   for (let i = 0; i < subtitles.length; i++) {
     const currentSub = subtitles[i];
@@ -137,11 +202,28 @@ export function generateSRT(subtitles: Subtitle[], videoLength: number): string 
         ? Math.max(videoLength, startTime)
         : Math.max(nextStartTime - 0.001, startTime);
 
-    srtContent += `${i + 1}\n`;
-    srtContent += `${formatSRTTimestamp(startTime)} --> ${formatSRTTimestamp(
-      endTime
-    )}\n`;
-    srtContent += `${currentSub.dialogue}\n\n`;
+    const dialogueChunks = splitLongDialogue(currentSub.dialogue);
+    const cueDuration = Math.max(endTime - startTime, 0);
+    const totalGapDuration = AUTO_CHUNK_GAP_SECONDS * Math.max(dialogueChunks.length - 1, 0);
+    const availableDialogueDuration = Math.max(cueDuration - totalGapDuration, 0);
+    const chunkDuration = availableDialogueDuration / dialogueChunks.length;
+
+    for (let chunkIndex = 0; chunkIndex < dialogueChunks.length; chunkIndex++) {
+      const chunk = dialogueChunks[chunkIndex];
+      if (!chunk) {
+        continue;
+      }
+
+      const gapOffset = AUTO_CHUNK_GAP_SECONDS * chunkIndex;
+      const chunkStartTime = startTime + chunkDuration * chunkIndex + gapOffset;
+      const chunkEndTime =
+        chunkIndex === dialogueChunks.length - 1
+          ? endTime
+          : Math.max(chunkStartTime, chunkStartTime + chunkDuration - 0.001);
+
+      srtContent += buildSrtCue(cueIndex, chunkStartTime, chunkEndTime, chunk);
+      cueIndex++;
+    }
   }
 
   return srtContent.trim();
@@ -267,6 +349,15 @@ export function findSubtitleComment(comments: YouTubeComment[]): string | null {
   }
 
   return null;
+}
+
+export function appendCreditSubtitle(subtitleText: string, videoLength: number): string {
+  const creditStart = Math.max(videoLength - 3, 0);
+  const timestamp = formatDurationLabel(creditStart);
+  const creditLine = `(${timestamp}) Credits: "${CREDIT_DIALOGUE}"`;
+  const trimmedSubtitleText = subtitleText.trim();
+
+  return trimmedSubtitleText ? `${trimmedSubtitleText}\n${creditLine}` : creditLine;
 }
 
 function startSpinner(label: string): SpinnerHandle {
@@ -656,6 +747,7 @@ export async function main() {
     let outputFilePath: string | null = null;
     let subtitleText: string | null = null;
     let downloadedVideoPath: string | null = null;
+    let usedKakoeiSbiComment = false;
 
     if (videoUrl) {
       validateUrl(videoUrl);
@@ -677,6 +769,7 @@ export async function main() {
         subtitleText = findSubtitleComment(comments);
 
         if (subtitleText) {
+          usedKakoeiSbiComment = true;
           commentsSpinner.stop("Imported subtitles from a matching YouTube comment.");
         } else {
           commentsSpinner.stop(
@@ -712,6 +805,10 @@ export async function main() {
       subtitleText = await readSubtitleText(prompts);
     } else {
       console.log("\nUsing subtitle text imported from YouTube comments.");
+    }
+
+    if (usedKakoeiSbiComment) {
+      subtitleText = appendCreditSubtitle(subtitleText, videoLength);
     }
 
     const parsingSpinner = startSpinner("Processing subtitle text");
