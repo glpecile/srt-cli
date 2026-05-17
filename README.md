@@ -24,6 +24,14 @@ If you press Enter instead, the CLI falls back to the original manual flow and a
 
 To use the YouTube flow, make sure `yt-dlp` is installed and available in your `PATH`.
 
+You can also pass the URL directly as the first CLI argument:
+
+```bash
+bun run src/index.ts "https://www.youtube.com/watch?v=..."
+```
+
+If the URL contains `?` or `&`, wrap it in quotes so your shell does not interpret it.
+
 ## Run script from npm
 
 ```sh
@@ -61,5 +69,7 @@ bun run src/index.ts
 ```
 
 The first prompt accepts an optional YouTube URL. Leave it blank to use manual mode.
+
+You can skip that first prompt by passing a quoted YouTube URL as the first argument.
 
 This project was created using `bun init` in bun v1.1.30. [Bun](https://bun.sh) is a fast all-in-one JavaScript runtime.

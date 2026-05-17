@@ -299,16 +299,19 @@ export async function main() {
     terminal: Boolean(input.isTTY && output.isTTY),
   });
   const prompts = rl[Symbol.asyncIterator]();
+  const cliVideoUrl = process.argv[2]?.trim() ?? "";
 
   try {
     console.log("Welcome to the .srt Generator CLI!");
 
-    const videoUrl = (
-      await promptUser(
-        prompts,
-        "Paste a YouTube URL to auto-download and infer video length, or press Enter to continue manually: "
-      )
-    ).trim();
+    const videoUrl = cliVideoUrl
+      ? cliVideoUrl
+      : (
+          await promptUser(
+            prompts,
+            "Paste a YouTube URL to auto-download and infer video length, or press Enter to continue manually: "
+          )
+        ).trim();
 
     let videoLength: number;
     let outputFilePath: string | null = null;
