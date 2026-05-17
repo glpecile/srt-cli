@@ -40,6 +40,6 @@
     "lint": "tsc",
     "ci": "bun run lint && bun test",
     "prepublishOnly": "bun run ci",
-    "publish": "npm publish"
+    "release": "npm publish"
   }
 }
