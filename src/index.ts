@@ -39,7 +39,7 @@ const COMMENT_AUTHOR_CANDIDATES = [
 const SUBTITLE_LINE_PATTERN =
   /^\s*\(?[0-9]+(?::[0-9]{1,2}){1,2}\)?\s*[^:]+:\s*["“]?.+["”]?\s*$/u;
 
-function parseTimestamp(timestamp: string): number {
+export function parseTimestamp(timestamp: string): number {
   const parts = timestamp
     .trim()
     .split(":")
@@ -70,7 +70,7 @@ function parseTimestamp(timestamp: string): number {
   return hours * 3600 + minutes * 60 + seconds;
 }
 
-function formatSRTTimestamp(seconds: number): string {
+export function formatSRTTimestamp(seconds: number): string {
   const safeSeconds = Math.max(seconds, 0);
   const pad = (num: number): string => num.toString().padStart(2, "0");
   const hours = Math.floor(safeSeconds / 3600);
@@ -84,7 +84,7 @@ function formatSRTTimestamp(seconds: number): string {
     .padStart(3, "0")}`;
 }
 
-function formatDurationLabel(seconds: number): string {
+export function formatDurationLabel(seconds: number): string {
   const totalSeconds = Math.floor(seconds);
   const hours = Math.floor(totalSeconds / 3600);
   const minutes = Math.floor((totalSeconds % 3600) / 60);
@@ -98,7 +98,7 @@ function formatDurationLabel(seconds: number): string {
   return `${minutes}:${pad(secs)}`;
 }
 
-function generateSRT(subtitles: Subtitle[], videoLength: number): string {
+export function generateSRT(subtitles: Subtitle[], videoLength: number): string {
   let srtContent = "";
 
   for (let i = 0; i < subtitles.length; i++) {
@@ -126,14 +126,17 @@ function generateSRT(subtitles: Subtitle[], videoLength: number): string {
   return srtContent.trim();
 }
 
-function splitCompositeSubtitleLine(line: string): string[] {
+export function splitCompositeSubtitleLine(line: string): string[] {
   return line
     .split(/\s+#\s+(?=\(?\d+(?::\d{1,2}){1,2})/)
     .map((entry) => entry.trim())
     .filter(Boolean);
 }
 
-function parseSubtitleLine(line: string, warnOnInvalid = true): Subtitle | null {
+export function parseSubtitleLine(
+  line: string,
+  warnOnInvalid = true
+): Subtitle | null {
   const match = line
     .trim()
     .match(/^\(?([0-9:]+)\)?\s*([^:]+):\s*["“]?(.+?)["”]?$/u);
@@ -160,7 +163,10 @@ function parseSubtitleLine(line: string, warnOnInvalid = true): Subtitle | null 
   };
 }
 
-function parseSubtitles(subtitleText: string, warnOnInvalid = true): Subtitle[] {
+export function parseSubtitles(
+  subtitleText: string,
+  warnOnInvalid = true
+): Subtitle[] {
   return subtitleText
     .split(/\r?\n/)
     .flatMap(splitCompositeSubtitleLine)
@@ -172,7 +178,7 @@ function ensureSrtExtension(fileName: string): string {
   return fileName.toLowerCase().endsWith(".srt") ? fileName : `${fileName}.srt`;
 }
 
-function normalizeCommentAuthor(value: string | undefined): string {
+export function normalizeCommentAuthor(value: string | undefined): string {
   return value
     ?.trim()
     .toLowerCase()
@@ -181,7 +187,7 @@ function normalizeCommentAuthor(value: string | undefined): string {
     .replace(/[^a-z0-9]/g, "") ?? "";
 }
 
-function getCommentAuthorCandidates(comment: YouTubeComment): string[] {
+export function getCommentAuthorCandidates(comment: YouTubeComment): string[] {
   const values = [comment.author, comment.author_id, comment.author_url]
     .map(normalizeCommentAuthor)
     .filter(Boolean);
@@ -189,7 +195,7 @@ function getCommentAuthorCandidates(comment: YouTubeComment): string[] {
   return [...new Set(values)];
 }
 
-function isMatchingCommentAuthor(comment: YouTubeComment): boolean {
+export function isMatchingCommentAuthor(comment: YouTubeComment): boolean {
   const candidates = getCommentAuthorCandidates(comment);
   const expectedCandidates = COMMENT_AUTHOR_CANDIDATES.map(normalizeCommentAuthor);
 
@@ -203,11 +209,13 @@ function isMatchingCommentAuthor(comment: YouTubeComment): boolean {
   );
 }
 
-function extractCommentText(comment: YouTubeComment): string {
+export function extractCommentText(comment: YouTubeComment): string {
   return comment.text?.trim() ?? "";
 }
 
-function extractSubtitleTextFromComment(commentText: string): string | null {
+export function extractSubtitleTextFromComment(
+  commentText: string
+): string | null {
   const subtitleLines = commentText
     .split(/\r?\n/)
     .map((line) => line.trim())
@@ -222,7 +230,7 @@ function extractSubtitleTextFromComment(commentText: string): string | null {
   return subtitleLines.join("\n");
 }
 
-function findSubtitleComment(comments: YouTubeComment[]): string | null {
+export function findSubtitleComment(comments: YouTubeComment[]): string | null {
   const candidateComments = comments
     .filter(isMatchingCommentAuthor)
     .sort((left, right) => Number(right.is_pinned) - Number(left.is_pinned));
@@ -487,37 +495,26 @@ export async function main() {
         `Found \"${metadata.title}\" (${formatDurationLabel(videoLength)}).`
       );
 
-      const importCommentAnswer = (
-        await promptUser(
-          prompts,
-          "Try to import subtitles from @KakoeiSbi's YouTube comment? (y/N): "
-        )
-      )
-        .trim()
-        .toLowerCase();
+      console.log();
+      const commentsSpinner = startSpinner("Looking for a matching YouTube comment");
 
-      if (importCommentAnswer === "y" || importCommentAnswer === "yes") {
-        console.log();
-        const commentsSpinner = startSpinner("Looking for a matching YouTube comment");
+      try {
+        const comments = await fetchYouTubeComments(videoUrl);
+        subtitleText = findSubtitleComment(comments);
 
-        try {
-          const comments = await fetchYouTubeComments(videoUrl);
-          subtitleText = findSubtitleComment(comments);
-
-          if (subtitleText) {
-            commentsSpinner.stop("Imported subtitles from a matching YouTube comment.");
-          } else {
-            commentsSpinner.stop(
-              "No parseable @KakoeiSbi comment found. Falling back to manual subtitle entry."
-            );
-          }
-        } catch (error) {
-          commentsSpinner.fail(
-            error instanceof Error
-              ? `Could not load YouTube comments: ${error.message}`
-              : "Could not load YouTube comments."
+        if (subtitleText) {
+          commentsSpinner.stop("Imported subtitles from a matching YouTube comment.");
+        } else {
+          commentsSpinner.stop(
+            "No parseable @KakoeiSbi comment found. Falling back to manual subtitle entry."
           );
         }
+      } catch (error) {
+        commentsSpinner.fail(
+          error instanceof Error
+            ? `Could not load YouTube comments: ${error.message}`
+            : "Could not load YouTube comments."
+        );
       }
 
       const downloadSpinner = startSpinner("Downloading video with yt-dlp");

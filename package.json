@@ -1,7 +1,7 @@
 {
   "name": "srt-cli",
   "description": "Simple CLI tool to generate .srt files",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "author": {
     "name": "Gian Luca Pecile",
     "url": "https://glpecile.xyz"
@@ -36,8 +36,9 @@
   },
   "scripts": {
     "start": "bun run ./src/index.ts",
+    "test": "bun test",
     "lint": "tsc",
-    "ci": "bun run lint",
+    "ci": "bun run lint && bun test",
     "prepublishOnly": "bun run ci",
     "publish": "npm publish"
   }
