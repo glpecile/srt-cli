@@ -14,7 +14,30 @@ interface VideoMetadata {
   duration: number;
 }
 
+interface YouTubeComment {
+  author?: string;
+  author_id?: string;
+  author_url?: string;
+  text?: string;
+  is_pinned?: boolean;
+}
+
+interface SpinnerHandle {
+  stop(successMessage?: string): void;
+  fail(errorMessage: string): void;
+}
+
 type PromptReader = AsyncIterableIterator<string>;
+
+const COMMENT_AUTHOR_CANDIDATES = [
+  "KakoeiSbi",
+  "@KakoeiSbi",
+  "https://www.youtube.com/@KakoeiSbi",
+  "https://youtube.com/@KakoeiSbi",
+];
+
+const SUBTITLE_LINE_PATTERN =
+  /^\s*\(?[0-9]+(?::[0-9]{1,2}){1,2}\)?\s*[^:]+:\s*["“]?.+["”]?\s*$/u;
 
 function parseTimestamp(timestamp: string): number {
   const parts = timestamp
@@ -110,19 +133,23 @@ function splitCompositeSubtitleLine(line: string): string[] {
     .filter(Boolean);
 }
 
-function parseSubtitleLine(line: string): Subtitle | null {
+function parseSubtitleLine(line: string, warnOnInvalid = true): Subtitle | null {
   const match = line
     .trim()
     .match(/^\(?([0-9:]+)\)?\s*([^:]+):\s*["“]?(.+?)["”]?$/u);
 
   if (!match?.[1] || !match[2] || !match[3]) {
-    console.warn(`Warning: Invalid subtitle format: ${line}`);
+    if (warnOnInvalid) {
+      console.warn(`Warning: Invalid subtitle format: ${line}`);
+    }
     return null;
   }
 
   const timestamp = match[1].trim();
   if (Number.isNaN(parseTimestamp(timestamp))) {
-    console.warn(`Warning: Invalid subtitle timestamp: ${line}`);
+    if (warnOnInvalid) {
+      console.warn(`Warning: Invalid subtitle timestamp: ${line}`);
+    }
     return null;
   }
 
@@ -133,16 +160,123 @@ function parseSubtitleLine(line: string): Subtitle | null {
   };
 }
 
-function parseSubtitles(subtitleText: string): Subtitle[] {
+function parseSubtitles(subtitleText: string, warnOnInvalid = true): Subtitle[] {
   return subtitleText
     .split(/\r?\n/)
     .flatMap(splitCompositeSubtitleLine)
-    .map(parseSubtitleLine)
+    .map((line) => parseSubtitleLine(line, warnOnInvalid))
     .filter((subtitle): subtitle is Subtitle => subtitle !== null);
 }
 
 function ensureSrtExtension(fileName: string): string {
   return fileName.toLowerCase().endsWith(".srt") ? fileName : `${fileName}.srt`;
+}
+
+function normalizeCommentAuthor(value: string | undefined): string {
+  return value
+    ?.trim()
+    .toLowerCase()
+    .replace(/^https?:\/\/(www\.)?youtube\.com\//, "")
+    .replace(/^@/, "")
+    .replace(/[^a-z0-9]/g, "") ?? "";
+}
+
+function getCommentAuthorCandidates(comment: YouTubeComment): string[] {
+  const values = [comment.author, comment.author_id, comment.author_url]
+    .map(normalizeCommentAuthor)
+    .filter(Boolean);
+
+  return [...new Set(values)];
+}
+
+function isMatchingCommentAuthor(comment: YouTubeComment): boolean {
+  const candidates = getCommentAuthorCandidates(comment);
+  const expectedCandidates = COMMENT_AUTHOR_CANDIDATES.map(normalizeCommentAuthor);
+
+  return expectedCandidates.some((expected) =>
+    candidates.some(
+      (candidate) =>
+        candidate === expected ||
+        candidate.includes(expected) ||
+        expected.includes(candidate)
+    )
+  );
+}
+
+function extractCommentText(comment: YouTubeComment): string {
+  return comment.text?.trim() ?? "";
+}
+
+function extractSubtitleTextFromComment(commentText: string): string | null {
+  const subtitleLines = commentText
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .flatMap(splitCompositeSubtitleLine)
+    .filter((line) => SUBTITLE_LINE_PATTERN.test(line));
+
+  if (subtitleLines.length === 0) {
+    return null;
+  }
+
+  return subtitleLines.join("\n");
+}
+
+function findSubtitleComment(comments: YouTubeComment[]): string | null {
+  const candidateComments = comments
+    .filter(isMatchingCommentAuthor)
+    .sort((left, right) => Number(right.is_pinned) - Number(left.is_pinned));
+
+  for (const comment of candidateComments) {
+    const extractedSubtitleText = extractSubtitleTextFromComment(
+      extractCommentText(comment)
+    );
+
+    if (extractedSubtitleText && parseSubtitles(extractedSubtitleText, false).length > 0) {
+      return extractedSubtitleText;
+    }
+  }
+
+  return null;
+}
+
+function startSpinner(label: string): SpinnerHandle {
+  if (!output.isTTY) {
+    output.write(`${label}...\n`);
+    return {
+      stop(successMessage) {
+        if (successMessage) {
+          output.write(`${successMessage}\n`);
+        }
+      },
+      fail(errorMessage) {
+        output.write(`${errorMessage}\n`);
+      },
+    };
+  }
+
+  const frames = ["|", "/", "-", "\\"];
+  let frameIndex = 0;
+  output.write(`${frames[frameIndex]} ${label}`);
+
+  const interval = setInterval(() => {
+    frameIndex = (frameIndex + 1) % frames.length;
+    output.write(`\r${frames[frameIndex]} ${label}`);
+  }, 120);
+
+  const clear = (message: string) => {
+    clearInterval(interval);
+    output.write(`\r${message}${" ".repeat(Math.max(label.length + 2, 1))}\n`);
+  };
+
+  return {
+    stop(successMessage = `${label} done.`) {
+      clear(successMessage);
+    },
+    fail(errorMessage) {
+      clear(errorMessage);
+    },
+  };
 }
 
 function getSrtPathFromVideo(videoPath: string): string {
@@ -222,6 +356,30 @@ async function fetchVideoMetadata(url: string): Promise<VideoMetadata> {
         : "video",
     duration: metadata.duration,
   };
+}
+
+async function fetchYouTubeComments(url: string): Promise<YouTubeComment[]> {
+  const output = await runCommand([
+    "yt-dlp",
+    "--dump-single-json",
+    "--no-playlist",
+    "--no-warnings",
+    "--skip-download",
+    "--write-comments",
+    url,
+  ]);
+
+  let metadata: { comments?: unknown };
+
+  try {
+    metadata = JSON.parse(output) as { comments?: unknown };
+  } catch {
+    throw new Error("yt-dlp returned invalid comment metadata.");
+  }
+
+  return Array.isArray(metadata.comments)
+    ? (metadata.comments as YouTubeComment[])
+    : [];
 }
 
 async function downloadVideo(url: string): Promise<string> {
@@ -315,19 +473,56 @@ export async function main() {
 
     let videoLength: number;
     let outputFilePath: string | null = null;
+    let subtitleText: string | null = null;
 
     if (videoUrl) {
       validateUrl(videoUrl);
 
-      console.log("\nFetching video metadata...");
+      console.log();
+      const metadataSpinner = startSpinner("Fetching video metadata");
       const metadata = await fetchVideoMetadata(videoUrl);
+      metadataSpinner.stop("Fetched video metadata.");
       videoLength = metadata.duration;
       console.log(
         `Found \"${metadata.title}\" (${formatDurationLabel(videoLength)}).`
       );
 
-      console.log("Downloading video with yt-dlp...");
+      const importCommentAnswer = (
+        await promptUser(
+          prompts,
+          "Try to import subtitles from @KakoeiSbi's YouTube comment? (y/N): "
+        )
+      )
+        .trim()
+        .toLowerCase();
+
+      if (importCommentAnswer === "y" || importCommentAnswer === "yes") {
+        console.log();
+        const commentsSpinner = startSpinner("Looking for a matching YouTube comment");
+
+        try {
+          const comments = await fetchYouTubeComments(videoUrl);
+          subtitleText = findSubtitleComment(comments);
+
+          if (subtitleText) {
+            commentsSpinner.stop("Imported subtitles from a matching YouTube comment.");
+          } else {
+            commentsSpinner.stop(
+              "No parseable @KakoeiSbi comment found. Falling back to manual subtitle entry."
+            );
+          }
+        } catch (error) {
+          commentsSpinner.fail(
+            error instanceof Error
+              ? `Could not load YouTube comments: ${error.message}`
+              : "Could not load YouTube comments."
+          );
+        }
+      }
+
+      const downloadSpinner = startSpinner("Downloading video with yt-dlp");
       const downloadedVideoPath = await downloadVideo(videoUrl);
+      downloadSpinner.stop("Downloaded video.");
       outputFilePath = getSrtPathFromVideo(downloadedVideoPath);
       console.log(`Video saved to: ${downloadedVideoPath}`);
       console.log(`Subtitle file will be written to: ${outputFilePath}`);
@@ -343,8 +538,15 @@ export async function main() {
       }
     }
 
-    const subtitleText = await readSubtitleText(prompts);
+    if (!subtitleText) {
+      subtitleText = await readSubtitleText(prompts);
+    } else {
+      console.log("\nUsing subtitle text imported from YouTube comments.");
+    }
+
+    const parsingSpinner = startSpinner("Processing subtitle text");
     const subtitles = parseSubtitles(subtitleText);
+    parsingSpinner.stop(`Processed ${subtitles.length} subtitle entries.`);
 
     if (subtitles.length === 0) {
       throw new Error("No valid subtitles were provided.");
@@ -358,8 +560,10 @@ export async function main() {
       outputFilePath = ensureSrtExtension(outputFileName.trim() || "output");
     }
 
+    const writingSpinner = startSpinner("Writing SRT file");
     const srtContent = generateSRT(subtitles, videoLength);
     await write(outputFilePath, srtContent);
+    writingSpinner.stop("Wrote SRT file.");
     console.log(`.srt file generated successfully: ${outputFilePath}`);
   } finally {
     rl.close();
