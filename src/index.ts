@@ -48,8 +48,7 @@ function generateSRT(subtitles: Subtitle[], videoLength: number): string {
         srtContent += `${formatSRTTimestamp(startTime)} --> ${formatSRTTimestamp(
             endTime
         )}\n`;
-        if (currentSub)
-            srtContent += `${currentSub.dialogue}\n\n`;
+        if (currentSub) srtContent += `${currentSub.dialogue}\n\n`;
 
         index++;
     }
@@ -95,23 +94,25 @@ export async function main() {
         "\nEnter the name for the output SRT file (e.g., output.srt): "
     );
 
-  // Process subtitles
-  const subtitles = subtitleText
-    .trim()
-    .split(/\n{2,}/)
-    .map((block) => {
-      const match = block.trim().match(/^\(?([^)]+)\)?\s*([^:]+):\s*"?(.+?)"?$/s);
-      if (match?.[2] && match[3]) {
-        return {
-          timestamp: match[1],
-          speaker: match[2].trim(),
-          dialogue: match[3].trim().replace(/^"|"$/g, ""), // Remove leading/trailing quotes if present
-        };
-      }
-      console.warn(`Warning: Invalid subtitle format: ${block}`);
-      return null;
-    })
-    .filter((subtitle): subtitle is Subtitle => subtitle !== null);
+    // Process subtitles
+    const subtitles = subtitleText
+        .trim()
+        .split(/\n{2,}/)
+        .map((block) => {
+            const match = block
+                .trim()
+                .match(/^\(?([^)]+)\)?\s*([^:]+):\s*"?(.+?)"?$/s);
+            if (match?.[2] && match[3]) {
+                return {
+                    timestamp: match[1],
+                    speaker: match[2].trim(),
+                    dialogue: match[3].trim().replace(/^"|"$/g, ""), // Remove leading/trailing quotes if present
+                };
+            }
+            console.warn(`Warning: Invalid subtitle format: ${block}`);
+            return null;
+        })
+        .filter((subtitle): subtitle is Subtitle => subtitle !== null);
 
     // Generate and write SRT content
     const srtContent = generateSRT(subtitles, videoLength);
