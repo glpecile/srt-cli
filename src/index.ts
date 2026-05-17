@@ -1,4 +1,5 @@
 import { write } from "bun";
+import { unlink } from "node:fs/promises";
 import { basename, dirname, extname, join } from "node:path";
 import { stdin as input, stdout as output } from "node:process";
 import { createInterface } from "node:readline";
@@ -294,6 +295,10 @@ function getSrtPathFromVideo(videoPath: string): string {
   );
 }
 
+export function getEmbeddedVideoPath(videoPath: string): string {
+  return join(dirname(videoPath), `${basename(videoPath, extname(videoPath))}.subbed.mkv`);
+}
+
 function readStream(
   stream: ReadableStream<Uint8Array> | null | undefined
 ): Promise<string> {
@@ -395,6 +400,10 @@ async function downloadVideo(url: string): Promise<string> {
     "yt-dlp",
     "--no-progress",
     "--no-playlist",
+    "--no-write-info-json",
+    "--no-write-comments",
+    "--no-write-description",
+    "--no-write-thumbnail",
     "--print",
     "filename",
     "--print",
@@ -413,6 +422,32 @@ async function downloadVideo(url: string): Promise<string> {
   }
 
   return downloadedFilePath;
+}
+
+async function embedSubtitles(videoPath: string, srtPath: string): Promise<string> {
+  const outputPath = getEmbeddedVideoPath(videoPath);
+
+  await runCommand([
+    "ffmpeg",
+    "-y",
+    "-i",
+    videoPath,
+    "-i",
+    srtPath,
+    "-map",
+    "0",
+    "-map",
+    "1:0",
+    "-c",
+    "copy",
+    "-c:s",
+    "srt",
+    "-metadata:s:s:0",
+    "language=eng",
+    outputPath,
+  ]);
+
+  return outputPath;
 }
 
 function validateUrl(url: string): void {
@@ -482,6 +517,7 @@ export async function main() {
     let videoLength: number;
     let outputFilePath: string | null = null;
     let subtitleText: string | null = null;
+    let downloadedVideoPath: string | null = null;
 
     if (videoUrl) {
       validateUrl(videoUrl);
@@ -518,11 +554,10 @@ export async function main() {
       }
 
       const downloadSpinner = startSpinner("Downloading video with yt-dlp");
-      const downloadedVideoPath = await downloadVideo(videoUrl);
+      downloadedVideoPath = await downloadVideo(videoUrl);
       downloadSpinner.stop("Downloaded video.");
       outputFilePath = getSrtPathFromVideo(downloadedVideoPath);
-      console.log(`Video saved to: ${downloadedVideoPath}`);
-      console.log(`Subtitle file will be written to: ${outputFilePath}`);
+      console.log(`Downloaded video to: ${downloadedVideoPath}`);
     } else {
       const videoLengthInput = await promptUser(
         prompts,
@@ -561,7 +596,17 @@ export async function main() {
     const srtContent = generateSRT(subtitles, videoLength);
     await write(outputFilePath, srtContent);
     writingSpinner.stop("Wrote SRT file.");
-    console.log(`.srt file generated successfully: ${outputFilePath}`);
+
+    if (downloadedVideoPath) {
+      const embedSpinner = startSpinner("Embedding subtitles into video with ffmpeg");
+      const embeddedVideoPath = await embedSubtitles(downloadedVideoPath, outputFilePath);
+      embedSpinner.stop("Embedded subtitles into video.");
+      await Promise.all([unlink(downloadedVideoPath), unlink(outputFilePath)]);
+      console.log(`Cleaned up intermediate files: ${downloadedVideoPath}, ${outputFilePath}`);
+      console.log(`Subtitled video generated successfully: ${embeddedVideoPath}`);
+    } else {
+      console.log(`.srt file generated successfully: ${outputFilePath}`);
+    }
   } finally {
     rl.close();
   }

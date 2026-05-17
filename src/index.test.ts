@@ -3,6 +3,7 @@ import {
   extractSubtitleTextFromComment,
   findSubtitleComment,
   generateSRT,
+  getEmbeddedVideoPath,
   isMatchingCommentAuthor,
   parseSubtitles,
   parseTimestamp,
@@ -114,6 +115,11 @@ describe("generateSRT", () => {
         "World",
       ].join("\n")
     );
+  });
+
+  test("derives the embedded video output path", () => {
+    expect(getEmbeddedVideoPath("/tmp/video.webm")).toBe("/tmp/video.subbed.mkv");
+    expect(getEmbeddedVideoPath("/tmp/My Clip.mp4")).toBe("/tmp/My Clip.subbed.mkv");
   });
 });
 

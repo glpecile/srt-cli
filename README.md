@@ -18,13 +18,15 @@ If you paste a YouTube URL at the first prompt, the CLI will:
 1. Fetch the video metadata with `yt-dlp`
 2. Download the video with `yt-dlp`
 3. Infer the video length automatically
-4. Save the generated `.srt` next to the downloaded video
+4. Create a temporary `.srt`
+5. Create a new `.subbed.mkv` video with the subtitles embedded using `ffmpeg`
+6. Delete the temporary `.srt` and the original downloaded video when embedding succeeds
 
 While the CLI is downloading, parsing, or writing files, it now shows a small loading state in the terminal.
 
 If you press Enter instead, the CLI falls back to the original manual flow and asks for the video length and output file name.
 
-To use the YouTube flow, make sure `yt-dlp` is installed and available in your `PATH`.
+To use the YouTube flow, make sure `yt-dlp` and `ffmpeg` are installed and available in your `PATH`.
 
 You can also pass the URL directly as the first CLI argument:
 
@@ -35,6 +37,8 @@ bun run src/index.ts "https://www.youtube.com/watch?v=..."
 If the URL contains `?` or `&`, wrap it in quotes so your shell does not interpret it.
 
 After loading a YouTube video, the CLI automatically tries to import subtitle text from a YouTube comment left by `@KakoeiSbi`. The author matching is fuzzy, so it can still match handle, channel URL, or similar author identifiers returned by `yt-dlp`. If no matching parseable comment is found, it falls back to manual subtitle entry.
+
+When a video is downloaded from YouTube, the CLI creates a final `.subbed.mkv` file with the subtitles embedded as a subtitle track. If `ffmpeg` succeeds, the temporary `.srt` and the original downloaded video are deleted. If `ffmpeg` fails, those intermediate files are left in place so you can recover manually.
 
 ## Run script from npm
 
