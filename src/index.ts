@@ -46,6 +46,7 @@ class CliCancelledError extends Error {
 let activeSpinner: SpinnerHandle | null = null;
 let cancelActiveSubprocess: (() => void) | null = null;
 let cliCancelled = false;
+let cleanupFilePaths = new Set<string>();
 
 const COMMENT_AUTHOR_CANDIDATES = [
   "KakoeiSbi",
@@ -63,6 +64,18 @@ const AUTO_CHUNK_GAP_SECONDS = 0.12;
 
 function isCliCancelledError(error: unknown): error is CliCancelledError {
   return error instanceof CliCancelledError;
+}
+
+async function cleanupFiles(filePaths: Iterable<string>): Promise<void> {
+  await Promise.all(
+    [...filePaths].map(async (filePath) => {
+      try {
+        await unlink(filePath);
+      } catch {
+        // Ignore missing or already-cleaned files.
+      }
+    })
+  );
 }
 
 export function parseTimestamp(timestamp: string): number {
@@ -721,6 +734,7 @@ export async function main() {
   cliCancelled = false;
   activeSpinner = null;
   cancelActiveSubprocess = null;
+  cleanupFilePaths = new Set<string>();
 
   const rl = createInterface({
     input,
@@ -784,11 +798,6 @@ export async function main() {
         );
       }
 
-      const downloadSpinner = startSpinner("Downloading video with yt-dlp");
-      downloadedVideoPath = await downloadVideo(videoUrl);
-      downloadSpinner.stop("Downloaded video.");
-      outputFilePath = getSrtPathFromVideo(downloadedVideoPath);
-      console.log(`Downloaded video to: ${downloadedVideoPath}`);
     } else {
       const videoLengthInput = await promptUser(
         prompts,
@@ -819,6 +828,16 @@ export async function main() {
       throw new Error("No valid subtitles were provided.");
     }
 
+    if (videoUrl) {
+      const downloadSpinner = startSpinner("Downloading video with yt-dlp");
+      downloadedVideoPath = await downloadVideo(videoUrl);
+      downloadSpinner.stop("Downloaded video.");
+      outputFilePath = getSrtPathFromVideo(downloadedVideoPath);
+      cleanupFilePaths.add(downloadedVideoPath);
+      cleanupFilePaths.add(outputFilePath);
+      console.log(`Downloaded video to: ${downloadedVideoPath}`);
+    }
+
     if (!outputFilePath) {
       const outputFileName = await promptUser(
         prompts,
@@ -831,12 +850,15 @@ export async function main() {
     const srtContent = generateSRT(subtitles, videoLength);
     await write(outputFilePath, srtContent);
     writingSpinner.stop("Wrote SRT file.");
+    cleanupFilePaths.add(outputFilePath);
 
     if (downloadedVideoPath) {
       const embedSpinner = startSpinner("Embedding subtitles into video with ffmpeg");
       const embeddedVideoPath = await embedSubtitles(downloadedVideoPath, outputFilePath);
       embedSpinner.stop("Embedded subtitles into video.");
-      await Promise.all([unlink(downloadedVideoPath), unlink(outputFilePath)]);
+      await cleanupFiles([downloadedVideoPath, outputFilePath]);
+      cleanupFilePaths.delete(downloadedVideoPath);
+      cleanupFilePaths.delete(outputFilePath);
       console.log(`Cleaned up intermediate files: ${downloadedVideoPath}, ${outputFilePath}`);
       console.log(`Subtitled video generated successfully: ${embeddedVideoPath}`);
     } else {
@@ -844,6 +866,7 @@ export async function main() {
     }
   } catch (error) {
     if (isCliCancelledError(error) || cliCancelled) {
+      await cleanupFiles(cleanupFilePaths);
       if (!cancellationHandler.spinnerCancelled()) {
         output.write("\nCancelled.\n");
       }
@@ -857,6 +880,7 @@ export async function main() {
     cliCancelled = false;
     cancelActiveSubprocess = null;
     activeSpinner = null;
+    cleanupFilePaths = new Set<string>();
     rl.close();
   }
 }
