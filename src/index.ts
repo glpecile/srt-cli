@@ -1,9 +1,12 @@
 #!/usr/bin/env bun
 import { write } from "bun";
+import boxen from "boxen";
+import chalk from "chalk";
 import { unlink } from "node:fs/promises";
 import { basename, dirname, extname, join } from "node:path";
 import { stdin as input, stdout as output } from "node:process";
 import { createInterface, emitKeypressEvents } from "node:readline";
+import ora, { type Ora } from "ora";
 
 interface Subtitle {
   timestamp: string;
@@ -24,11 +27,6 @@ interface YouTubeComment {
   is_pinned?: boolean;
 }
 
-interface SpinnerHandle {
-  stop(successMessage?: string): void;
-  fail(errorMessage: string): void;
-}
-
 type PromptReader = AsyncIterableIterator<string>;
 
 interface Keypress {
@@ -43,7 +41,7 @@ class CliCancelledError extends Error {
   }
 }
 
-let activeSpinner: SpinnerHandle | null = null;
+let activeSpinner: Ora | null = null;
 let cancelActiveSubprocess: (() => void) | null = null;
 let cliCancelled = false;
 let cleanupFilePaths = new Set<string>();
@@ -259,7 +257,7 @@ export function parseSubtitleLine(
 
   if (!match?.[1] || !match[2] || !match[3]) {
     if (warnOnInvalid) {
-      console.warn(`Warning: Invalid subtitle format: ${line}`);
+      console.warn(chalk.yellow(`Warning: Invalid subtitle format: ${line}`));
     }
     return null;
   }
@@ -267,7 +265,7 @@ export function parseSubtitleLine(
   const timestamp = match[1].trim();
   if (Number.isNaN(parseTimestamp(timestamp))) {
     if (warnOnInvalid) {
-      console.warn(`Warning: Invalid subtitle timestamp: ${line}`);
+      console.warn(chalk.yellow(`Warning: Invalid subtitle timestamp: ${line}`));
     }
     return null;
   }
@@ -288,6 +286,37 @@ export function parseSubtitles(
     .flatMap(splitCompositeSubtitleLine)
     .map((line) => parseSubtitleLine(line, warnOnInvalid))
     .filter((subtitle): subtitle is Subtitle => subtitle !== null);
+}
+
+export function validateSubtitleTimestamps(
+  subtitles: Subtitle[],
+  videoLength: number
+): void {
+  let previousStartTime = -Infinity;
+
+  for (const subtitle of subtitles) {
+    const startTime = parseTimestamp(subtitle.timestamp);
+
+    if (startTime < previousStartTime) {
+      throw new Error(
+        chalk.red(
+          `Subtitles must be in chronological order: "${subtitle.timestamp}" comes after a later timestamp.`
+        )
+      );
+    }
+
+    if (startTime > videoLength) {
+      console.warn(
+        chalk.yellow(
+          `Warning: Subtitle at ${subtitle.timestamp} starts after the video length (${formatDurationLabel(
+            videoLength
+          )}).`
+        )
+      );
+    }
+
+    previousStartTime = startTime;
+  }
 }
 
 function ensureSrtExtension(fileName: string): string {
@@ -373,80 +402,15 @@ export function appendCreditSubtitle(subtitleText: string, videoLength: number):
   return trimmedSubtitleText ? `${trimmedSubtitleText}\n${creditLine}` : creditLine;
 }
 
-function startSpinner(label: string): SpinnerHandle {
-  let done = false;
-  let handle: SpinnerHandle;
-
-  if (!output.isTTY) {
-    output.write(`${label}...\n`);
-    handle = {
-      stop(successMessage) {
-        if (done) {
-          return;
-        }
-
-        done = true;
-        if (activeSpinner === handle) {
-          activeSpinner = null;
-        }
-
-        if (successMessage) {
-          output.write(`${successMessage}\n`);
-        }
-      },
-      fail(errorMessage) {
-        if (done) {
-          return;
-        }
-
-        done = true;
-        if (activeSpinner === handle) {
-          activeSpinner = null;
-        }
-
-        output.write(`${errorMessage}\n`);
-      },
-    };
-
-    activeSpinner = handle;
-    return handle;
+function startSpinner(label: string): Ora {
+  if (activeSpinner) {
+    activeSpinner.stop();
   }
-
-  const frames = ["|", "/", "-", "\\"];
-  let frameIndex = 0;
-  output.write(`${frames[frameIndex]} ${label}`);
-
-  const interval = setInterval(() => {
-    frameIndex = (frameIndex + 1) % frames.length;
-    output.write(`\r${frames[frameIndex]} ${label}`);
-  }, 120);
-
-  const clear = (message: string) => {
-    if (done) {
-      return;
-    }
-
-    done = true;
-    clearInterval(interval);
-    if (activeSpinner === handle) {
-      activeSpinner = null;
-    }
-
-    output.write(`\r${message}${" ".repeat(Math.max(label.length + 2, 1))}\n`);
-  };
-
-  handle = {
-    stop(successMessage = `${label} done.`) {
-      clear(successMessage);
-    },
-    fail(errorMessage) {
-      clear(errorMessage);
-    },
-  };
-
-  activeSpinner = handle;
-  return handle;
+  const spinner = ora(label).start();
+  activeSpinner = spinner;
+  return spinner;
 }
+
 
 function createCancellationHandler(rl: ReturnType<typeof createInterface>) {
   let spinnerCancelled = false;
@@ -687,11 +651,29 @@ async function embedSubtitles(videoPath: string, srtPath: string): Promise<strin
   return outputPath;
 }
 
+export function isYouTubeHostname(hostname: string): boolean {
+  const normalized = hostname.toLowerCase();
+  return (
+    normalized === "youtube.com" ||
+    normalized === "youtu.be" ||
+    normalized.endsWith(".youtube.com") ||
+    normalized.endsWith(".youtu.be")
+  );
+}
+
 function validateUrl(url: string): void {
+  let parsedUrl: URL;
+
   try {
-    new URL(url);
+    parsedUrl = new URL(url);
   } catch {
-    throw new Error("Invalid URL. Paste a full YouTube URL or press Enter for manual mode.");
+    throw new Error(chalk.red("Invalid URL. Paste a full YouTube URL or press Enter for manual mode."));
+  }
+
+  if (!isYouTubeHostname(parsedUrl.hostname)) {
+    throw new Error(
+      chalk.red("That doesn't look like a YouTube URL. Paste a full YouTube URL or press Enter for manual mode.")
+    );
   }
 }
 
@@ -699,7 +681,9 @@ async function readSubtitleText(
   prompts: PromptReader
 ): Promise<string> {
   console.log(
-    "\nEnter the subtitle text (one subtitle per line, press Enter twice when finished):"
+    chalk.dim(
+      "\nEnter the subtitle text (one subtitle per line, press Enter twice when finished):"
+    )
   );
 
   const lines: string[] = [];
@@ -720,7 +704,7 @@ async function promptUser(
   prompts: PromptReader,
   question: string
 ): Promise<string> {
-  output.write(question);
+  output.write(chalk.dim(question));
 
   const nextLine = await prompts.next();
   if (nextLine.done) {
@@ -728,6 +712,80 @@ async function promptUser(
   }
 
   return nextLine.value;
+}
+
+async function promptForVideoLength(prompts: PromptReader): Promise<number> {
+  while (true) {
+    const videoLengthInput = await promptUser(
+      prompts,
+      `Enter the video length in ${chalk.dim("mm:ss")} (e.g., 2:30): `
+    );
+    const videoLength = parseTimestamp(videoLengthInput || "2:30");
+
+    if (!Number.isNaN(videoLength) && videoLength > 0) {
+      return videoLength;
+    }
+
+    console.log(chalk.red("Invalid video length. Please enter a valid mm:ss value greater than 0."));
+  }
+}
+
+async function promptForOutputFilePath(prompts: PromptReader): Promise<string> {
+  while (true) {
+    const outputFileName = await promptUser(
+      prompts,
+      `\nEnter the name for the output SRT file (e.g., ${chalk.dim("output.srt")}): `
+    );
+    const trimmedOutputFileName = outputFileName.trim();
+
+    if (!trimmedOutputFileName) {
+      console.log(chalk.red("Please enter a valid file name."));
+      continue;
+    }
+
+    const candidatePath = ensureSrtExtension(trimmedOutputFileName);
+
+    if (await Bun.file(candidatePath).exists()) {
+      const overwriteAnswer = await promptUser(
+        prompts,
+        chalk.yellow(`"${candidatePath}" already exists. Overwrite? (y/N): `)
+      );
+
+      if (!/^y(es)?$/iu.test(overwriteAnswer.trim())) {
+        continue;
+      }
+    }
+
+    return candidatePath;
+  }
+}
+
+function verifyDependencies(dependencies: string[]): void {
+  const missingDependencies = dependencies.filter((dep) => !Bun.which(dep));
+
+  if (missingDependencies.length === 0) {
+    return;
+  }
+
+  console.log(chalk.red("Missing required system dependencies."));
+  console.log(chalk.yellow("Please install the following dependencies and ensure they are in your system's PATH:"));
+  missingDependencies.forEach((dep) => console.log(`- ${chalk.bold(dep)}`));
+  process.exit(1);
+}
+
+function showWelcomeMessage(): void {
+  const title = chalk.bold.blue("SRT CLI Generator");
+  const description = chalk.dim("A simple CLI tool to generate .srt files.");
+  console.log(
+    boxen(`${title}\n${description}`, {
+      padding: 1,
+      margin: 1,
+      borderStyle: "round",
+      borderColor: "blue",
+      title: "Welcome",
+      titleAlignment: "center",
+    })
+  );
 }
 
 export async function main() {
@@ -746,7 +804,8 @@ export async function main() {
   const cliVideoUrl = process.argv[2]?.trim() ?? "";
 
   try {
-    console.log("Welcome to the .srt Generator CLI!");
+    showWelcomeMessage();
+    verifyDependencies(["yt-dlp", "ffmpeg"]);
 
     const videoUrl = cliVideoUrl
       ? cliVideoUrl
@@ -769,10 +828,12 @@ export async function main() {
       console.log();
       const metadataSpinner = startSpinner("Fetching video metadata");
       const metadata = await fetchVideoMetadata(videoUrl);
-      metadataSpinner.stop("Fetched video metadata.");
+      metadataSpinner.succeed(chalk.green("Fetched video metadata."));
       videoLength = metadata.duration;
       console.log(
-        `Found \"${metadata.title}\" (${formatDurationLabel(videoLength)}).`
+        `Found ${chalk.bold(`"${metadata.title}"`)} (${chalk.dim(
+          formatDurationLabel(videoLength)
+        )}).`
       );
 
       console.log();
@@ -784,36 +845,34 @@ export async function main() {
 
         if (subtitleText) {
           usedKakoeiSbiComment = true;
-          commentsSpinner.stop("Imported subtitles from a matching YouTube comment.");
+          commentsSpinner.succeed(chalk.green("Imported subtitles from a matching YouTube comment."));
         } else {
-          commentsSpinner.stop(
-            "No parseable @KakoeiSbi comment found. Falling back to manual subtitle entry."
+          commentsSpinner.warn(
+            chalk.yellow("No parseable @KakoeiSbi comment found. Falling back to manual subtitle entry.")
           );
         }
       } catch (error) {
         commentsSpinner.fail(
-          error instanceof Error
-            ? `Could not load YouTube comments: ${error.message}`
-            : "Could not load YouTube comments."
+          chalk.red(
+            error instanceof Error
+              ? `Could not load YouTube comments: ${error.message}`
+              : "Could not load YouTube comments."
+          )
         );
       }
 
     } else {
-      const videoLengthInput = await promptUser(
-        prompts,
-        "Enter the video length in mm:ss (ex. 2:30): "
-      );
-      videoLength = parseTimestamp(videoLengthInput || "2:30");
-
-      if (Number.isNaN(videoLength) || videoLength <= 0) {
-        throw new Error("Invalid video length. Please enter a valid mm:ss value.");
-      }
+      videoLength = await promptForVideoLength(prompts);
     }
 
     if (!subtitleText) {
       subtitleText = await readSubtitleText(prompts);
+      if (!subtitleText.trim()) {
+        console.log(chalk.yellow("No subtitle text provided. Aborting."));
+        return;
+      }
     } else {
-      console.log("\nUsing subtitle text imported from YouTube comments.");
+      console.log(chalk.blue("\nUsing subtitle text imported from YouTube comments."));
     }
 
     if (usedKakoeiSbiComment) {
@@ -822,53 +881,51 @@ export async function main() {
 
     const parsingSpinner = startSpinner("Processing subtitle text");
     const subtitles = parseSubtitles(subtitleText);
-    parsingSpinner.stop(`Processed ${subtitles.length} subtitle entries.`);
 
     if (subtitles.length === 0) {
-      throw new Error("No valid subtitles were provided.");
+      parsingSpinner.fail(chalk.red("No valid subtitles were found in the provided text."));
+      return;
     }
+    parsingSpinner.succeed(chalk.green(`Processed ${chalk.bold(subtitles.length)} subtitle entries.`));
+    validateSubtitleTimestamps(subtitles, videoLength);
 
     if (videoUrl) {
       const downloadSpinner = startSpinner("Downloading video with yt-dlp");
       downloadedVideoPath = await downloadVideo(videoUrl);
-      downloadSpinner.stop("Downloaded video.");
+      downloadSpinner.succeed(chalk.green("Downloaded video."));
       outputFilePath = getSrtPathFromVideo(downloadedVideoPath);
       cleanupFilePaths.add(downloadedVideoPath);
       cleanupFilePaths.add(outputFilePath);
-      console.log(`Downloaded video to: ${downloadedVideoPath}`);
+      console.log(`Downloaded video to: ${chalk.bold(downloadedVideoPath)}`);
     }
 
     if (!outputFilePath) {
-      const outputFileName = await promptUser(
-        prompts,
-        "\nEnter the name for the output SRT file (e.g., output.srt): "
-      );
-      outputFilePath = ensureSrtExtension(outputFileName.trim() || "output");
+      outputFilePath = await promptForOutputFilePath(prompts);
     }
 
     const writingSpinner = startSpinner("Writing SRT file");
     const srtContent = generateSRT(subtitles, videoLength);
     await write(outputFilePath, srtContent);
-    writingSpinner.stop("Wrote SRT file.");
+    writingSpinner.succeed(chalk.green("Wrote SRT file."));
     cleanupFilePaths.add(outputFilePath);
 
     if (downloadedVideoPath) {
       const embedSpinner = startSpinner("Embedding subtitles into video with ffmpeg");
       const embeddedVideoPath = await embedSubtitles(downloadedVideoPath, outputFilePath);
-      embedSpinner.stop("Embedded subtitles into video.");
+      embedSpinner.succeed(chalk.green("Embedded subtitles into video."));
       await cleanupFiles([downloadedVideoPath, outputFilePath]);
       cleanupFilePaths.delete(downloadedVideoPath);
       cleanupFilePaths.delete(outputFilePath);
-      console.log(`Cleaned up intermediate files: ${downloadedVideoPath}, ${outputFilePath}`);
-      console.log(`Subtitled video generated successfully: ${embeddedVideoPath}`);
+      console.log(chalk.dim(`Cleaned up intermediate files: ${downloadedVideoPath}, ${outputFilePath}`));
+      console.log(chalk.green.bold(`\nSubtitled video generated successfully: ${embeddedVideoPath}`));
     } else {
-      console.log(`.srt file generated successfully: ${outputFilePath}`);
+      console.log(chalk.green.bold(`\n.srt file generated successfully: ${outputFilePath}`));
     }
   } catch (error) {
     if (isCliCancelledError(error) || cliCancelled) {
       await cleanupFiles(cleanupFilePaths);
       if (!cancellationHandler.spinnerCancelled()) {
-        output.write("\nCancelled.\n");
+        output.write(chalk.yellow("\nCancelled.\n"));
       }
 
       return;
@@ -888,7 +945,7 @@ export async function main() {
 // Run the main function if this script is executed directly
 if (import.meta.main) {
     main().catch((error) => {
-        console.error("An error occurred:", error);
+        console.error(chalk.red("An error occurred:"), error);
         process.exit(1);
     });
 }

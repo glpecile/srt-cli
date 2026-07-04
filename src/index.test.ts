@@ -6,9 +6,11 @@ import {
   generateSRT,
   getEmbeddedVideoPath,
   isMatchingCommentAuthor,
+  isYouTubeHostname,
   parseSubtitles,
   parseTimestamp,
   splitLongDialogue,
+  validateSubtitleTimestamps,
 } from "./index.ts";
 
 describe("parseTimestamp", () => {
@@ -161,6 +163,57 @@ describe("subtitle post-processing", () => {
     expect(appendCreditSubtitle('(00:00) A: "Hello"', 19)).toBe(
       '(00:00) A: "Hello"\n(0:16) Credits: "Subtitle translation credits: @KakoeiSbi"'
     );
+  });
+});
+
+describe("isYouTubeHostname", () => {
+  test("accepts standard and regional YouTube hostnames", () => {
+    expect(isYouTubeHostname("youtube.com")).toBe(true);
+    expect(isYouTubeHostname("www.youtube.com")).toBe(true);
+    expect(isYouTubeHostname("m.youtube.com")).toBe(true);
+    expect(isYouTubeHostname("music.youtube.com")).toBe(true);
+    expect(isYouTubeHostname("youtu.be")).toBe(true);
+  });
+
+  test("rejects unrelated or spoofed hostnames", () => {
+    expect(isYouTubeHostname("example.com")).toBe(false);
+    expect(isYouTubeHostname("notyoutube.com")).toBe(false);
+    expect(isYouTubeHostname("youtube.com.evil.com")).toBe(false);
+  });
+});
+
+describe("validateSubtitleTimestamps", () => {
+  test("accepts in-order timestamps within the video length", () => {
+    expect(() =>
+      validateSubtitleTimestamps(
+        [
+          { timestamp: "00:00", speaker: "A", dialogue: "Hi" },
+          { timestamp: "00:05", speaker: "B", dialogue: "Hey" },
+        ],
+        10
+      )
+    ).not.toThrow();
+  });
+
+  test("throws when timestamps are out of order", () => {
+    expect(() =>
+      validateSubtitleTimestamps(
+        [
+          { timestamp: "00:05", speaker: "A", dialogue: "Hi" },
+          { timestamp: "00:02", speaker: "B", dialogue: "Hey" },
+        ],
+        10
+      )
+    ).toThrow();
+  });
+
+  test("warns but does not throw when a timestamp exceeds the video length", () => {
+    expect(() =>
+      validateSubtitleTimestamps(
+        [{ timestamp: "00:20", speaker: "A", dialogue: "Hi" }],
+        10
+      )
+    ).not.toThrow();
   });
 });
 

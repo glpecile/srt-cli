@@ -41,5 +41,10 @@
     "ci": "bun run lint && bun test",
     "prepublishOnly": "bun run ci",
     "release": "npm publish"
+  },
+  "dependencies": {
+    "boxen": "8.0.1",
+    "chalk": "5.6.2",
+    "ora": "9.4.1"
   }
 }
